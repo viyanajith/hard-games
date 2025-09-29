@@ -20,15 +20,11 @@
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 16px;
     cursor: pointer;
-    z-index: 100;
+    z-index: 120;
     text-decoration: none;
     transition: all 0.3s ease;
   }
-  
-  #back-button:hover {
-    background: rgba(138, 43, 226, 0.9);
-    transform: scale(1.05);
-  }
+  #back-button:hover { background: rgba(138, 43, 226, 0.9); transform: scale(1.05); }
   
   #hud {
     position: fixed;
@@ -38,23 +34,97 @@
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 16px;
     text-align: right;
-    z-index: 100;
+    z-index: 120;
     background: rgba(0, 0, 0, 0.5);
     padding: 10px 15px;
     border-radius: 10px;
   }
-  
-  #hud div {
-    margin: 5px 0;
+  #hud div { margin: 5px 0; }
+
+  /* Win overlay */
+  #win {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    z-index: 130;
+    background: radial-gradient(1200px 800px at 50% 50%, rgba(255,255,255,0.06), rgba(0,0,0,0.6) 70%);
+    backdrop-filter: blur(2px);
+  }
+  #win h1 {
+    margin: 0 0 18px 0;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    font-weight: 900;
+    font-size: clamp(36px, 8vw, 96px);
+    letter-spacing: 2px;
+    color: transparent;
+    background: linear-gradient(90deg, #8a2be2, #00f0ff, #ff7bda, #8a2be2);
+    background-size: 300% 100%;
+    -webkit-background-clip: text;
+            background-clip: text;
+    animation: glow 4s linear infinite;
+    text-shadow: 0 0 12px rgba(138,43,226,0.35);
+  }
+  #win p {
+    margin: 0 0 24px 0;
+    color: #e8e8e8;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+    opacity: 0.9;
+  }
+  #play-again {
+    padding: 12px 22px;
+    border-radius: 999px;
+    border: 2px solid white;
+    color: white;
+    background: rgba(138, 43, 226, 0.85);
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+    cursor: pointer;
+    transition: transform .15s ease, background .2s ease;
+  }
+  #play-again:hover { transform: translateY(-1px) scale(1.03); background: rgba(138, 43, 226, 1); }
+  @keyframes glow { 
+    0% { background-position: 0% 50%; } 
+    100% { background-position: 200% 50%; } 
+  }
+
+  /* Gap label (h6) */
+  #gap-label{
+    position: fixed;
+    left: 15px;
+    bottom: 15px;
+    margin: 0;
+    padding: 6px 10px;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-weight: 600;
+    font-size: 12px; /* h6-ish */
+    color: rgb(235,235,235);
+    background: rgba(0,0,0,0.35);
+    border-radius: 8px;
+    z-index: 120;
+    pointer-events: none;
   }
 </style>
 </head>
 <body>
 <a id="back-button" href="https://viyanajith.github.io/hard-games/mainscreen.html">← Back to Menu</a>
+
 <div id="hud">
   <div id="score">Score: 0</div>
   <div id="highscore">Highscore: 0</div>
 </div>
+
+<h6 id="gap-label">Gap: 100px</h6>
+
+<div id="win">
+  <h1>YOU WON!!!!</h1>
+  <p>Legendary run. Want to go again?</p>
+  <button id="play-again" onclick="location.reload()">Play Again</button>
+</div>
+
 <canvas id="stage"></canvas>
 <script>
 (() => {
@@ -63,6 +133,9 @@
 
   const canvas = document.getElementById('stage');
   const ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+  const winOverlay = document.getElementById('win');
+  const gapLabel = document.getElementById('gap-label');
 
   // ===== DPI-aware full screen =====
   let W=0, H=0;
@@ -76,7 +149,6 @@
     canvas.style.height= H+'px';
     ctx.setTransform(dpr,0,0,dpr,0,0);
 
-    // sync rect height & clamp hole
     rect.h = H;
     if (rect.holeY > H - HOLE_H) rect.holeY = Math.max(0, H - HOLE_H);
     if (state==='play') rect.x = Math.min(rect.x, W - rect.w);
@@ -97,18 +169,21 @@
   // ===== Pipe (single) =====
   const RECT_W = 100;               // width (px)
   const HOLE_W = RECT_W;
-  const HOLE_H = 75;                // gap height (px) — decimals allowed (e.g., 75.0)
+  let   HOLE_H = 100;               // dynamic gap height (starts at 100px)
   const SPEED_PER_TICK = 12;        // pipe speed (px left per 33ms tick)
 
   const rect = { x:0, w:RECT_W, h:0, holeY:0, scored:false };
-  function rerollHole(){ rect.holeY = (H <= HOLE_H) ? 0 : (Math.random()*(H - HOLE_H))|0; }
+  function rerollHole(){
+    rect.holeY = (H <= HOLE_H) ? 0 : (Math.random() * (H - HOLE_H)) | 0;
+  }
 
   // ===== Old-style explosion (simple shards, gravity + spin) =====
   let shards = [];
   let reloadCountdownMs = null;
-  let state = 'play'; // 'play' | 'exploding'
+  let state = 'play'; // 'play' | 'exploding' | 'won'
 
   function spawnPlayerExplosion(screenCX, screenCY){
+    if (state === 'won') return;
     state = 'exploding';
     const chunk = 6;
     const left = screenCX - player.size/2;
@@ -141,7 +216,7 @@
 
   function updateShards(){
     if (shards.length === 0){
-      if (reloadCountdownMs === null) reloadCountdownMs = 1000; // 1 seconds for reload
+      if (state === 'exploding' && reloadCountdownMs === null) reloadCountdownMs = 1000; // 1s → reload
       return;
     }
     const GRAV = 1.0;
@@ -153,7 +228,6 @@
       s.vx *= DRAG; s.vy *= DRAG; s.omega *= 0.997;
       s.cx += s.vx; s.cy += s.vy; s.angle += s.omega;
 
-      // delete when bottom hits screen bottom (rotated-rect Y extent)
       const c = Math.cos(s.angle), sn = Math.sin(s.angle);
       const yExtent = Math.abs(c)*(s.h/2) + Math.abs(sn)*(s.w/2);
       const bottom = s.cy + yExtent;
@@ -190,51 +264,99 @@
     }
   }
 
+  // ===== Pause system (lag-free) =====
+  let userPaused = false; // via console: pauseGame(true/false)
+  let autoPaused = false; // visibility/blur
+  const isPaused = () => (userPaused || autoPaused) && state !== 'won';
+
+  const STEP_MS = 33;
+  let last = performance.now(), acc = 0;
+  function resetTimebase(){ last = performance.now(); acc = 0; }
+
+  // Expose console command
+  window.pauseGame = function(flag){
+    const prev = isPaused();
+    userPaused = !!flag;
+    if (prev !== isPaused()) resetTimebase();
+  };
+
+  // Auto-pause/resume based on tab/window focus
+  function setAutoPaused(flag){
+    const prev = isPaused();
+    autoPaused = !!flag;
+    if (prev !== isPaused()) resetTimebase();
+  }
+  document.addEventListener('visibilitychange', () => setAutoPaused(document.hidden));
+  window.addEventListener('blur',  () => setAutoPaused(true));
+  window.addEventListener('focus', () => setAutoPaused(false));
+
+  function renderPauseOverlay(){
+    if (!userPaused || state === 'won') return;
+    ctx.save();
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 28px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Paused', W/2, H/2 - 8);
+    ctx.font = '14px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+    ctx.fillText('Use pauseGame(false) to resume', W/2, H/2 + 18);
+    ctx.restore();
+  }
+
   // ===== Input =====
   const keys = new Set();
-  
-  // Keyboard controls
+  // Keyboard
   addEventListener('keydown', e => {
     if (e.code==='Space'){ e.preventDefault(); keys.add('Space'); }
     if (e.key?.toLowerCase()==='c'){ trail.length = 0; } // clear trail
   }, {passive:false});
-  
   addEventListener('keyup', e => { 
     if (e.code==='Space'){ e.preventDefault(); keys.delete('Space'); }
   }, {passive:false});
-  
-  // Mouse/touch controls
-  const handlePointerDown = (e) => {
-    e.preventDefault();
-    keys.add('Space');
-  };
-  
-  const handlePointerUp = (e) => {
-    e.preventDefault();
-    keys.delete('Space');
-  };
-  
-  // Add event listeners for mouse and touch
+  // Mouse/touch
+  const handlePointerDown = (e) => { e.preventDefault(); keys.add('Space'); };
+  const handlePointerUp   = (e) => { e.preventDefault(); keys.delete('Space'); };
   document.addEventListener('mousedown', handlePointerDown);
-  document.addEventListener('mouseup', handlePointerUp);
-  document.addEventListener('touchstart', handlePointerDown, {passive: false});
-  document.addEventListener('touchend', handlePointerUp, {passive: false});
-  
-  // Prevent default touch behavior to avoid scrolling
-  document.addEventListener('touchmove', (e) => {
-    if (keys.has('Space')) {
-      e.preventDefault();
-    }
-  }, { passive: false });
+  document.addEventListener('mouseup',   handlePointerUp);
+  document.addEventListener('touchstart', handlePointerDown, {passive:false});
+  document.addEventListener('touchend',   handlePointerUp,   {passive:false});
+  document.addEventListener('touchmove', (e) => { if (keys.has('Space')) e.preventDefault(); }, { passive:false });
 
   // ===== Utils =====
   function aabb(ax,ay,aw,ah, bx,by,bw,bh){
     return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
   }
 
-  // ===== Fixed 33ms tick =====
-  const STEP_MS = 33;
-  let last = performance.now(), acc = 0;
+  function triggerWin(){
+    state = 'won';
+    canvas.style.display = 'none';
+    hud.style.display = 'none';
+    winOverlay.style.display = 'flex';
+    keys.clear();
+  }
+
+  function onScored(){
+    score += 1;
+    maybeUpdateHighscore();
+
+    // Increase difficulty
+    HOLE_H = Math.max(20, HOLE_H - 1);  // gap shrinks each score
+    if (rect.holeY > H - HOLE_H) rect.holeY = Math.max(0, H - HOLE_H);
+
+    if (HOLE_H < 60) {
+      // Shrink player with the gap once under 60
+      player.size = Math.max(10, player.size - 1);
+    }
+
+    // Win condition
+    if (HOLE_H <= 20 && player.size <= 10) {
+      triggerWin();
+    }
+  }
 
   function logicTick(){
     if (state === 'play'){
@@ -251,19 +373,19 @@
 
       // Pipe movement
       rect.x -= SPEED_PER_TICK;
+
       // Score when the pipe fully passes left of the player X
       const playerCenterX = Math.round(toX(player.x));
       if (!rect.scored && (rect.x + rect.w) < playerCenterX){
         rect.scored = true;
-        score += 1;
-        maybeUpdateHighscore();
+        onScored();
       }
 
       if (rect.x + rect.w < 0){
         rect.x = W - rect.w;
         rect.h = H;
         rerollHole();
-        rect.scored = false; // new pipe, ready to score again
+        rect.scored = false;
       }
 
       // Collision (exclude the hole)
@@ -284,9 +406,7 @@
       // Edge collision (top/bottom of screen)
       const pyTop = py;
       const pyBottom = py + ps;
-      if (pyTop <= 0 || pyBottom >= H) {
-        hit = true;
-      }
+      if (pyTop <= 0 || pyBottom >= H) hit = true;
 
       if (hit){
         const pcx = px + ps/2, pcy = py + ps/2;
@@ -310,6 +430,8 @@
   }
 
   function render(){
+    if (state === 'won') return; // canvas hidden; overlay visible
+
     // BG
     ctx.fillStyle = BG; ctx.fillRect(0,0,W,H);
 
@@ -327,10 +449,9 @@
     }
     ctx.globalAlpha = 1;
 
-    // Pipe
+    // Pipe + hole
     ctx.fillStyle = PIPE_COLOR;
     ctx.fillRect(rect.x, 0, rect.w, rect.h);
-    // Hole
     ctx.fillStyle = BG;
     ctx.fillRect(rect.x, rect.holeY, HOLE_W, HOLE_H);
 
@@ -346,12 +467,26 @@
       drawShards();
     }
 
-    // Update HUD elements
+    // HUD (DOM)
     document.getElementById('score').textContent = `Score: ${score}`;
     document.getElementById('highscore').textContent = `Highscore: ${highscore}`;
+    // Gap label (DOM)
+    gapLabel.textContent = `Gap: ${Math.round(HOLE_H)}px`;
+
+    // Pause overlay (only when userPaused)
+    renderPauseOverlay();
   }
 
   function frame(now){
+    const paused = isPaused();
+
+    if (paused || state === 'won'){
+      resetTimebase();
+      render();
+      requestAnimationFrame(frame);
+      return;
+    }
+
     acc += now - last; last = now;
     while (acc >= STEP_MS){ logicTick(); acc -= STEP_MS; }
     render();
@@ -360,13 +495,15 @@
 
   function start(){
     resizeCanvas();
-    // Init
     loadHighscore();
     score = 0;
-    player.x = -180; player.y = 0; trail.length = 0;
+    player.x = -180; player.y = 0; player.size = 20;
+    trail.length = 0;
+
     rect.x = W - rect.w; rect.h = H; rerollHole(); rect.scored = false;
+
     shards = []; reloadCountdownMs = null; state = 'play';
-    last = performance.now(); acc = 0;
+    resetTimebase();
     requestAnimationFrame(frame);
   }
 
