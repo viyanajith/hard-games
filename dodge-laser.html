@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Dodge Laser Crossfire</title>
+<style>
+  html,body{height:100%;margin:0;overflow:hidden;background:rgb(23,20,23)}
+  canvas{display:block;width:100vw;height:100vh;background:rgb(23,20,23);image-rendering:pixelated}
+
+  /* Score / Highscore */
+  #score-h1, #highscore-h1{
+    position:fixed; margin:0; z-index:10;
+    font:800 clamp(18px,4vw,32px)/1.1 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    color:rgb(235,235,235); text-shadow:0 1px 0 rgba(0,0,0,.3);
+    padding:.3rem .6rem; background:rgba(0,0,0,.25); border-radius:10px;
+    user-select:none; pointer-events:none;
+  }
+  #score-h1{ left:12px; top:12px; }
+  #highscore-h1{ right:12px; top:12px; }
+
+  /* Lose overlay */
+  #lose{
+    position:fixed; inset:0; display:none; z-index:20;
+    align-items:center; justify-content:center; flex-direction:column;
+    background:radial-gradient(1000px 700px at 50% 50%, rgba(255,0,0,.12), rgba(0,0,0,.75) 70%);
+    backdrop-filter:blur(2px);
+  }
+  #lose h1{
+    margin:0 0 12px 0; color:#fff; text-align:center;
+    font:900 clamp(36px,10vw,96px)/1.05 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    letter-spacing:1px;
+  }
+  #lose p{
+    margin:0 0 18px 0; color:#eaeaea; font:600 16px system-ui,-apple-system,sans-serif;
+  }
+  #play-again{
+    padding:10px 18px; border-radius:999px; border:2px solid #fff; color:#fff;
+    background:rgba(138,43,226,.9); font:600 16px system-ui,-apple-system,sans-serif; cursor:pointer;
+    transition:transform .15s ease, background .2s ease;
+  }
+  #play-again:hover{ transform:translateY(-1px) scale(1.03); background:rgba(138,43,226,1); }
+
+  /* Bottom-left Back button (big & purple) */
+  #back-button{
+    position:fixed; left:15px; bottom:15px; z-index:25;
+    padding:14px 24px; border-radius:28px; border:2px solid #fff;
+    color:#fff; background:rgba(138,43,226,.9);
+    font:600 18px system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    text-decoration:none; cursor:pointer; transition:transform .15s ease, background .2s ease;
+  }
+  #back-button:hover{ transform:translateY(-1px) scale(1.03); background:rgba(138,43,226,1); }
+</style>
+</head>
+<body>
+<h1 id="score-h1">Score: 0</h1>
+<h1 id="highscore-h1">Highscore: 0</h1>
+
+<!-- Big purple back button (replaces entire URL) -->
+<a id="back-button" href="https://viyanajith.github.io/hard-games/mainscreen.html"
+   onclick="location.replace(this.href); return false;">← Back to Menu</a>
+
+<div id="lose">
+  <h1>YOU LOST</h1>
+  <p id="final-score">Score: 0</p>
+  <button id="play-again" onclick="location.reload()">Play Again</button>
+</div>
+
+<canvas id="stage"></canvas>
+
+<script>
+// ===== Constants =====
+const backgroundRGB   = 'rgb(23,20,23)';
+const playerSize      = 50;
+const playerColor     = 'rgb(235,235,235)';
+const maxPlayerSpeed  = 15;      // friction divisor for CLOCK()
+const tick            = 33;      // ms per logic step (~30 Hz)
+
+// Laser visuals & timings
+let   currentLaserWidth   = 35;                   // grows +5 at score multiples of 20
+const laserColorActive    = 'red';
+const laserColorWarn      = 'rgba(255,0,0,0.35)';
+const LASER_WARN_TICKS    = 20;
+const LASER_ACTIVE_TICKS  = 60;
+const LASER_COOL_TICKS    = 30;
+
+// ===== State =====
+let W=0, H=0, dpr=1;
+let px=0, py=0;            // player top-left
+let vx=0, vy=0;
+let keys = new Set();
+let interval = null;       // logic timer
+let rafId = null;          // render loop
+
+// Score / Highscore
+let score = 0;
+let highscore = 0;
+const HS_KEY = 'laserHighscore';
+let laserVanishCount = 0; // +1 when any laser goes active->cooldown
+
+const scoreH1 = document.getElementById('score-h1');
+const highH1  = document.getElementById('highscore-h1');
+
+// Difficulty milestones (apply once)
+const milestones10 = new Set();    // +1 laser
+const milestones20 = new Set();    // width +5
+
+// Lasers
+let nextLaserId = 1;
+/** laser: { id, orientation:'vertical'|'horizontal', pos:number, phase:'warn'|'active'|'cooldown', ticksLeft:number } */
+const lasers = [];
+
+// Pause/Lose states
+let userPaused = false;   // (not exposed here; auto-pause only)
+let autoPaused = false;
+let lost = false;
+
+// ===== Canvas =====
+const canvas = document.getElementById('stage');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas(){
+  dpr = Math.max(1, window.devicePixelRatio||1);
+  W = Math.floor(innerWidth);
+  H = Math.floor(innerHeight);
+  canvas.width  = Math.floor(W*dpr);
+  canvas.height = Math.floor(H*dpr);
+  canvas.style.width  = W+'px';
+  canvas.style.height = H+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+
+  // keep player in bounds
+  px = Math.min(px, Math.max(0, W - playerSize));
+  py = Math.min(py, Math.max(0, H - playerSize));
+
+  // re-seat lasers to preserve non-touching constraint
+  reseatAllLasers();
+}
+addEventListener('resize', resizeCanvas);
+
+// ===== Auto-pause when switching tabs/windows =====
+function isPaused(){ return (userPaused || autoPaused) && !lost; }
+document.addEventListener('visibilitychange', ()=>{ autoPaused = document.hidden; });
+window.addEventListener('blur',  ()=>{ autoPaused = true;  });
+window.addEventListener('focus', ()=>{ autoPaused = false; });
+
+// ===== Input (WASD) =====
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if ('wasd'.includes(k)) { e.preventDefault(); keys.add(k); }
+});
+addEventListener('keyup', e => {
+  const k = e.key.toLowerCase();
+  if ('wasd'.includes(k)) { e.preventDefault(); keys.delete(k); }
+});
+
+// ===== Momentum (your MOVE/CLOCK style) =====
+function MOVE(vel, dir){ if (dir > 0) vel += 1; else if (dir < 0) vel -= 1; return vel; }
+function CLOCK(pos, vel){ vel -= (vel / maxPlayerSpeed); pos += vel; return { pos, vel }; }
+
+// ===== Non-touching helpers for lasers =====
+function axisExtent(orientation){ return orientation==='vertical' ? W : H; }
+function isSlotFree(orientation, pos){
+  const w = currentLaserWidth;
+  for (const l of lasers){
+    if (l.orientation !== orientation) continue;
+    const a0 = pos, a1 = pos + w, b0 = l.pos, b1 = l.pos + w;
+    const conflict = !(a1 <= b0 - 1 || b1 <= a0 - 1); // need ≥1px gap
+    if (conflict) return false;
+  }
+  return true;
+}
+function pickNonTouchingPos(orientation){
+  const maxPos = Math.max(0, axisExtent(orientation) - currentLaserWidth);
+  for (let i=0;i<200;i++){
+    const pos = Math.floor(Math.random() * (maxPos + 1));
+    if (isSlotFree(orientation, pos)) return pos;
+  }
+  const step = currentLaserWidth + 1;
+  for (let pos=0; pos<=maxPos; pos+=step) if (isSlotFree(orientation, pos)) return pos;
+  for (let pos=0; pos<=maxPos; pos++)     if (isSlotFree(orientation, pos)) return pos;
+  return 0;
+}
+function reseatAllLasers(){
+  const verts = lasers.filter(l=>l.orientation==='vertical');
+  const hors  = lasers.filter(l=>l.orientation==='horizontal');
+  for (const group of [verts, hors]){
+    for (const l of group) l.pos = pickNonTouchingPos(l.orientation);
+  }
+}
+
+// ===== Lasers =====
+function randomOrientation(){ return Math.random() < 0.5 ? 'vertical' : 'horizontal'; }
+function setLaserPhase(l, phase){
+  l.phase = phase;
+  l.ticksLeft = (phase === 'warn') ? LASER_WARN_TICKS
+             : (phase === 'active') ? LASER_ACTIVE_TICKS
+             : LASER_COOL_TICKS;
+}
+function spawnLaser(initialPhase = 'warn', initialTicks = null){
+  const l = { id:`laser-${nextLaserId++}`, orientation:randomOrientation(), pos:0, phase:'warn', ticksLeft:0 };
+  l.pos = pickNonTouchingPos(l.orientation);
+  setLaserPhase(l, initialPhase);
+  if (initialTicks != null) l.ticksLeft = initialTicks;
+  lasers.push(l);
+}
+function updateLaser(l){
+  l.ticksLeft--;
+  if (l.ticksLeft > 0) return;
+
+  if (l.phase === 'warn'){
+    setLaserPhase(l, 'active');
+  } else if (l.phase === 'active'){
+    // Laser disappears: count toward score
+    laserVanishCount++;
+    if (laserVanishCount % 3 === 0){
+      score++;
+      updateScores();
+      applyDifficultyMilestones();
+    }
+    setLaserPhase(l, 'cooldown');
+  } else { // cooldown -> respawn
+    l.orientation = randomOrientation();
+    l.pos = pickNonTouchingPos(l.orientation);
+    setLaserPhase(l, 'warn');
+  }
+}
+function drawLaser(l){
+  if (l.phase === 'cooldown') return;
+  ctx.fillStyle = (l.phase === 'active') ? laserColorActive : laserColorWarn;
+  if (l.orientation === 'vertical'){
+    ctx.fillRect(l.pos, 0, currentLaserWidth, H);
+  } else {
+    ctx.fillRect(0, l.pos, W, currentLaserWidth);
+  }
+}
+
+// ===== Difficulty milestones =====
+function applyDifficultyMilestones(){
+  if (score > 0 && score % 10 === 0 && !milestones10.has(score)){
+    milestones10.add(score);
+    spawnLaser('warn', Math.floor(Math.random()*LASER_WARN_TICKS)+1); // +1 laser
+  }
+  if (score > 0 && score % 20 === 0 && !milestones20.has(score)){
+    milestones20.add(score);
+    currentLaserWidth += 5;  // widen
+    reseatAllLasers();
+  }
+}
+
+// ===== Collision (player vs ACTIVE lasers only) =====
+function aabb(ax,ay,aw,ah, bx,by,bw,bh){
+  return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
+}
+function checkLaserCollisions(){
+  const pr = { x:px, y:py, w:playerSize, h:playerSize };
+  for (const l of lasers){
+    if (l.phase !== 'active') continue; // only non-shaded
+    if (l.orientation === 'vertical'){
+      if (aabb(pr.x,pr.y,pr.w,pr.h, l.pos,0,currentLaserWidth,H)) return true;
+    } else {
+      if (aabb(pr.x,pr.y,pr.w,pr.h, 0,l.pos,W,currentLaserWidth)) return true;
+    }
+  }
+  return false;
+}
+
+// ===== Death handling =====
+const loseDiv = document.getElementById('lose');
+const finalScoreP = document.getElementById('final-score');
+let reloadTimer = null;
+
+function death(){
+  if (lost) return;
+  lost = true;
+
+  // Stop logic timer
+  if (interval) { clearInterval(interval); interval = null; }
+
+  // Show YOU LOST
+  finalScoreP.textContent = `Score: ${score}`;
+  loseDiv.style.display = 'flex';
+
+  // Auto-reload after 2 seconds
+  reloadTimer = setTimeout(() => location.reload(), 2000);
+}
+
+// ===== Highscore =====
+function loadHighscore(){
+  try {
+    const v = localStorage.getItem(HS_KEY);
+    highscore = v ? Math.max(0, parseInt(v,10)||0) : 0;
+  } catch { highscore = 0; }
+}
+function saveHighscore(){
+  try { localStorage.setItem(HS_KEY, String(highscore)); } catch {}
+}
+function updateScores(){
+  scoreH1.textContent = `Score: ${score}`;
+  if (score > highscore){
+    highscore = score;
+    saveHighscore();
+  }
+  highH1.textContent = `Highscore: ${highscore}`;
+}
+
+// ===== Logic (33ms, frozen while paused/lost) =====
+function step(){
+  if (isPaused() || lost) return;
+
+  // Movement
+  const dirX = (keys.has('d') ? 1 : 0) + (keys.has('a') ? -1 : 0);
+  const dirY = (keys.has('s') ? 1 : 0) + (keys.has('w') ? -1 : 0);
+  vx = MOVE(vx, dirX);
+  vy = MOVE(vy, dirY);
+  let r = CLOCK(px, vx); px = r.pos; vx = r.vel;
+  r = CLOCK(py, vy);     py = r.pos; vy = r.vel;
+
+  // Bounds & wall damping
+  if (px < 0)                 { px = 0;                if (vx < 0) vx = 0; }
+  if (py < 0)                 { py = 0;                if (vy < 0) vy = 0; }
+  if (px > W - playerSize)    { px = W - playerSize;   if (vx > 0) vx = 0; }
+  if (py > H - playerSize)    { py = H - playerSize;   if (vy > 0) vy = 0; }
+
+  // Lasers + scoring
+  for (const l of lasers) updateLaser(l);
+
+  // Collisions with ACTIVE lasers
+  if (checkLaserCollisions()) death();
+}
+
+// ===== Render (runs every frame to show pause/lose overlay cleanly) =====
+function render(){
+  // background
+  ctx.fillStyle = backgroundRGB;
+  ctx.fillRect(0,0,W,H);
+
+  // Lasers
+  for (const l of lasers) drawLaser(l);
+
+  // Player (hide if lost)
+  if (!lost){
+    ctx.fillStyle = playerColor;
+    ctx.fillRect(Math.round(px), Math.round(py), playerSize, playerSize);
+  }
+
+  // Pause overlay (only when paused & not lost)
+  if (isPaused()){
+    ctx.save();
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 28px system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Paused', W/2, H/2 - 8);
+    ctx.font = '14px system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif';
+    ctx.fillText('Back to the tab to resume', W/2, H/2 + 18);
+    ctx.restore();
+  }
+  rafId = requestAnimationFrame(render);
+}
+
+// ===== Start =====
+function start(){
+  resizeCanvas();
+
+  // player center
+  px = (W - playerSize) / 2;
+  py = (H - playerSize) / 2;
+  vx = 0; vy = 0;
+
+  // reset flags
+  lost = false; autoPaused = false; userPaused = false;
+  if (reloadTimer) { clearTimeout(reloadTimer); reloadTimer = null; }
+
+  // scores
+  loadHighscore();
+  score = 0; laserVanishCount = 0;
+  milestones10.clear(); milestones20.clear();
+  currentLaserWidth = 35;
+  updateScores();
+
+  // lasers (start with three, staggered)
+  lasers.length = 0;
+  spawnLaser('warn', Math.floor(Math.random()*LASER_WARN_TICKS)+1);
+  spawnLaser('active', Math.floor(Math.random()*LASER_ACTIVE_TICKS)+1);
+  spawnLaser('cooldown', Math.floor(Math.random()*LASER_COOL_TICKS)+1);
+
+  // timers
+  if (interval) clearInterval(interval);
+  interval = setInterval(step, tick);
+
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = requestAnimationFrame(render);
+}
+addEventListener('resize', resizeCanvas);
+start();
+</script>
+</body>
+</html>
